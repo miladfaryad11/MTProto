@@ -1,0 +1,63 @@
+name: Extract Telegram Proxies and Update Repo
+
+on:
+  # Trigger the workflow on push events to the main branch
+  push:
+    branches: [ main, master ] # Adjust branch names if needed
+
+  # Trigger the workflow on a schedule (e.g., daily at 00:00 UTC)
+  schedule:
+    # Use cron syntax: https://crontab.guru/
+    # This runs at 00:00 UTC every day
+    - cron: '*/15 * * * *'
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+# Grant permissions for the GITHUB_TOKEN to write contents
+# This is required by the git-auto-commit-action to push changes
+permissions:
+  contents: write
+
+jobs:
+  extract_proxies:
+    runs-on: ubuntu-latest # Use the latest Ubuntu runner
+
+    steps:
+      # Step 1: Checkout the repository code
+      # We checkout the default branch (main/master) to access the script and input file
+      - name: Checkout code
+        uses: actions/checkout@v4
+        # The git-auto-commit-action will handle checking out/committing to the target branch
+
+      # Step 2: Set up PHP with the cURL extension
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.x' # Use a recent PHP version
+          extensions: curl   # Enable the cURL extension
+
+      # Step 3: Run the PHP script
+      # This script generates index.html and extracted_proxies.json in the current directory
+      - name: Run PHP script to extract proxies
+        run: php extract_proxies.php
+
+      # Step 4: Commit and push the generated files back to the repository
+      - name: Commit generated files
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          file_pattern: index.html extracted_proxies.json
+          commit_message: Update extracted proxy list and HTML index
+          branch: gh-pages
+          create_branch: true # <-- Change this line from false to true
+          push_options: '--force-with-lease' # <-- Add this line
+
+      # Optional: Upload the files as artifacts as well for easy download from the run summary
+      # - name: Upload generated files as artifacts
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: generated-proxy-outputs
+      #     path: |
+      #       index.html
+      #       extracted_proxies.json
+      #     if-no-files-found: ignore # Don't fail if files weren't created (e.g., script failed)
