@@ -281,7 +281,7 @@ $scanTimestamp = $lastScanTime;
 
 // Render
 ob_start();
-require 'template.phtml';
+require 'template.html';
 $htmlContent = ob_get_clean();
 file_put_contents(CONFIG['output_html'], $htmlContent);
 
