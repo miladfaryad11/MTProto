@@ -28,6 +28,11 @@ const CONFIG = [
     'connect_timeout' => 10,         // seconds for HTTP fetch
     'min_scan_gap'    => 60,         // seconds between manual web scans
     'max_per_scan'    => 400,        // hard cap on proxies checked per run
+    // JSON APIs that return a proxy list. Each must answer with an object
+    // containing a "results" array of {server, port, secret} entries.
+    'json_sources'    => [
+        'https://miladfaryad.ir/get/index.php',
+    ],
 ];
 
 final class ProxyScanner
@@ -44,12 +49,21 @@ final class ProxyScanner
         echo "Starting Scan...\n";
         $usernames = $this->loadUsernames();
         if ($usernames === []) {
-            $this->warn('usernames.json is missing or empty');
-            return [];
+            $this->warn('usernames.json is missing or empty; using JSON sources only');
         }
 
-        $rawHtml = $this->fetchChannels($usernames);
-        $proxies = $this->extractProxies($rawHtml);
+        $proxies = [];
+        if ($usernames !== []) {
+            $rawHtml = $this->fetchChannels($usernames);
+            $proxies = $this->extractProxies($rawHtml);
+        }
+
+        // Merge proxies from the configured JSON APIs.
+        $apiProxies = $this->fetchJsonSources();
+        if ($apiProxies !== []) {
+            $proxies = $this->mergeProxies($proxies, $apiProxies);
+            echo 'Added ' . count($apiProxies) . " proxies from JSON sources.\n";
+        }
 
         echo 'Found ' . count($proxies) . " unique proxies. Checking connectivity...\n";
         $checked = $this->checkConnectivity($proxies);
@@ -153,6 +167,113 @@ final class ProxyScanner
         }
         curl_multi_close($mh);
         return $results;
+    }
+
+    /**
+     * Fetch and parse the configured JSON proxy APIs.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function fetchJsonSources(): array
+    {
+        $found = [];
+        foreach (CONFIG['json_sources'] as $url) {
+            $body = $this->httpGet($url);
+            if ($body === null) {
+                $this->warn("json source failed: {$url}");
+                continue;
+            }
+            $data = json_decode($body, true);
+            $rows = $data['results'] ?? null;
+            if (!is_array($rows)) {
+                $this->warn("json source has no results array: {$url}");
+                continue;
+            }
+            foreach ($rows as $row) {
+                if (!is_array($row)) {
+                    continue;
+                }
+                $proxy = $this->normalizeProxy(
+                    (string) ($row['server'] ?? ''),
+                    (string) ($row['port'] ?? ''),
+                    (string) ($row['secret'] ?? '')
+                );
+                if ($proxy !== null) {
+                    $found[$proxy['server'] . ':' . $proxy['port']] = $proxy;
+                }
+            }
+        }
+        return array_values($found);
+    }
+
+    private function httpGet(string $url): ?string
+    {
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_MAXREDIRS      => 3,
+            CURLOPT_TIMEOUT        => CONFIG['connect_timeout'],
+            CURLOPT_CONNECTTIMEOUT => CONFIG['connect_timeout'],
+            CURLOPT_USERAGENT      => $this->userAgent,
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_SSL_VERIFYHOST => 2,
+            CURLOPT_ENCODING       => '',
+            CURLOPT_PROTOCOLS      => CURLPROTO_HTTPS,
+        ]);
+        $body = curl_exec($ch);
+        $code = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        curl_close($ch);
+
+        if ($body === false || $code !== 200 || $body === '') {
+            return null;
+        }
+        return (string) $body;
+    }
+
+    /**
+     * Validate one raw proxy entry (used by JSON sources).
+     *
+     * @return array<string, mixed>|null
+     */
+    private function normalizeProxy(string $server, string $port, string $secret): ?array
+    {
+        $server = $this->sanitizeServer($server);
+        if ($server === null) {
+            return null;
+        }
+        $portNum = $this->sanitizePort($port);
+        if ($portNum === null) {
+            return null;
+        }
+        $secret = $this->cleanSecret($secret);
+        if ($secret === null) {
+            return null;
+        }
+        return [
+            'server' => $server,
+            'port'   => $portNum,
+            'secret' => $secret,
+            'type'   => $this->detectType($secret),
+            'tg_url' => sprintf('tg://proxy?server=%s&port=%d&secret=%s', $server, $portNum, $secret),
+        ];
+    }
+
+    /**
+     * Merge two proxy lists, keeping the first occurrence of each server:port.
+     *
+     * @param array<int, array<string, mixed>> $a
+     * @param array<int, array<string, mixed>> $b
+     * @return array<int, array<string, mixed>>
+     */
+    private function mergeProxies(array $a, array $b): array
+    {
+        $merged = [];
+        foreach (array_merge($a, $b) as $proxy) {
+            $key = $proxy['server'] . ':' . $proxy['port'];
+            $merged[$key] ??= $proxy;
+        }
+        return array_values($merged);
     }
 
     /**
